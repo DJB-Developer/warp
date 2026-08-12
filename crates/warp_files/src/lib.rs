@@ -24,7 +24,7 @@ use repo_metadata::repository::{RepositorySubscriber, SubscriberId};
 use repo_metadata::{CanonicalizedPath, Repository, RepositoryUpdate, RepositoryWatchMode};
 use warp_core::HostId;
 use warp_util::content_version::ContentVersion;
-use warp_util::file::{FileId, FileLoadError, FileSaveError};
+use warp_util::file::{FileId, FileLoadError, FileSaveError, MAX_LOADABLE_FILE_SIZE_BYTES};
 use warp_util::standardized_path::StandardizedPath;
 use warpui_core::r#async::SpawnedFutureHandle;
 use warpui_core::{Entity, ModelContext, ModelHandle, SingletonEntity};
@@ -447,9 +447,12 @@ impl FileModel {
         let file_path_buf = file_path.to_owned();
         let future = ctx.spawn(
             async move {
-                let contents = async_fs::read_to_string(&file_path_buf)
-                    .await
-                    .map_err(FileLoadError::from);
+                let contents = match Self::check_not_too_large(&file_path_buf).await {
+                    Ok(()) => async_fs::read_to_string(&file_path_buf)
+                        .await
+                        .map_err(FileLoadError::from),
+                    Err(err) => Err(err),
+                };
                 (file_id, contents)
             },
             move |me, (file_id, load_result), ctx| {
@@ -521,9 +524,35 @@ impl FileModel {
         if !Self::file_exists(file_path).await {
             return Err(FileLoadError::DoesNotExist);
         }
+        Self::check_not_too_large(file_path).await?;
         async_fs::read_to_string(file_path)
             .await
             .map_err(FileLoadError::from)
+    }
+
+    /// Returns `Err(FileLoadError::TooLarge)` if `path`'s on-disk size exceeds
+    /// [`MAX_LOADABLE_FILE_SIZE_BYTES`]. Reading a file's full contents into a
+    /// `String` (as `open`/`read_content_for_file` do) can otherwise trigger a
+    /// single allocation as large as the file itself; an unexpectedly huge
+    /// file (a multi-gigabyte log, database, or binary opened by mistake) can
+    /// then spike process memory by that same amount. Checking the size
+    /// up front avoids ever attempting that allocation.
+    ///
+    /// If `metadata` fails (e.g. the file does not exist or was removed
+    /// concurrently), this returns `Ok(())` so the caller's own read attempt
+    /// surfaces the more specific underlying error.
+    async fn check_not_too_large(path: &Path) -> Result<(), FileLoadError> {
+        let Ok(metadata) = async_fs::metadata(path).await else {
+            return Ok(());
+        };
+        let size_bytes = metadata.len();
+        if size_bytes > MAX_LOADABLE_FILE_SIZE_BYTES {
+            return Err(FileLoadError::TooLarge {
+                size_bytes,
+                limit_bytes: MAX_LOADABLE_FILE_SIZE_BYTES,
+            });
+        }
+        Ok(())
     }
 
     /// Asynchronously reads specific lines from a file using BufReader.
@@ -1145,6 +1174,10 @@ impl FileModel {
             async move {
                 let mut res = Vec::new();
                 for file_path in matching_files {
+                    if let Err(err) = Self::check_not_too_large(&file_path).await {
+                        log::warn!("Skipping auto-reload of {}: {err}", file_path.display());
+                        continue;
+                    }
                     if let Ok(content) = async_fs::read_to_string(&file_path).await {
                         res.push((file_path, content));
                     }

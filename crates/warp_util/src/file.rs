@@ -32,12 +32,22 @@ impl ErrorExt for FileSaveError {
 }
 register_error!(FileSaveError);
 
+/// Maximum size, in bytes, of a file that can be fully loaded into memory as a
+/// `String` (e.g. to populate an editor buffer). Reading larger files whole
+/// risks multi-gigabyte allocations for pathologically large files (logs,
+/// binaries opened by mistake, etc.); callers should check
+/// [`FileLoadError::TooLarge`] and surface a friendly error instead of
+/// attempting the read.
+pub const MAX_LOADABLE_FILE_SIZE_BYTES: u64 = 100 * 1024 * 1024;
+
 #[derive(thiserror::Error, Debug)]
 pub enum FileLoadError {
     #[error("File does not exist")]
     DoesNotExist,
     #[error("IO error when loading file.")]
     IOError(#[from] io::Error),
+    #[error("File is too large to open ({size_bytes} bytes, limit is {limit_bytes} bytes)")]
+    TooLarge { size_bytes: u64, limit_bytes: u64 },
 }
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]

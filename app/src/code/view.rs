@@ -127,6 +127,23 @@ pub fn init(app: &mut AppContext) {
 
 const PADDING: f32 = 4.;
 
+/// Renders a byte count in human-readable units (e.g. `8.6 GB`), used for the
+/// "file too large to open" toast message.
+fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit_index = 0;
+    while size >= 1024.0 && unit_index < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_index += 1;
+    }
+    if unit_index == 0 {
+        format!("{bytes} {}", UNITS[unit_index])
+    } else {
+        format!("{size:.1} {}", UNITS[unit_index])
+    }
+}
+
 pub use crate::util::openable_file_type::is_binary_file;
 /// Determines the `SavePosition` ID for a draggable tab based on its index.
 pub fn tab_position_id(index: usize) -> String {
@@ -516,7 +533,7 @@ impl CodeView {
                     return;
                 }
                 log::warn!("Failed to load file. {err:?}");
-                CodeView::display_load_failure(ctx.window_id(), ctx);
+                CodeView::display_load_failure(ctx.window_id(), err, ctx);
             }
             LocalCodeEditorEvent::SelectionAddedAsContext {
                 relative_file_path,
@@ -924,10 +941,26 @@ impl CodeView {
         }
     }
 
-    fn display_load_failure(window_id: WindowId, ctx: &mut ViewContext<Self>) {
+    fn display_load_failure(
+        window_id: WindowId,
+        error: &warp_util::file::FileLoadError,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let message = match error {
+            warp_util::file::FileLoadError::TooLarge {
+                size_bytes,
+                limit_bytes,
+            } => format!(
+                "File is too large to open ({} > {} limit).",
+                format_file_size(*size_bytes),
+                format_file_size(*limit_bytes)
+            ),
+            warp_util::file::FileLoadError::DoesNotExist
+            | warp_util::file::FileLoadError::IOError(_) => "Failed to load file.".to_string(),
+        };
         ToastStack::handle(ctx).update(ctx, |toast_stack, ctx| {
-            let toast = DismissibleToast::error(String::from("Failed to load file."))
-                .with_object_id("failed_to_load_file".to_string());
+            let toast =
+                DismissibleToast::error(message).with_object_id("failed_to_load_file".to_string());
             toast_stack.add_ephemeral_toast(toast, window_id, ctx);
         });
     }

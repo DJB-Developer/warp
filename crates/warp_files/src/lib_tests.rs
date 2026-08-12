@@ -356,4 +356,64 @@ fn test_a_failed_open_registers_no_watcher() {
     });
 }
 
+/// Opening a file whose on-disk size exceeds `MAX_LOADABLE_FILE_SIZE_BYTES`
+/// must fail with `FileLoadError::TooLarge` instead of reading the whole file
+/// into memory. A single pathologically large file (a huge log, a binary
+/// opened by mistake, etc.) could otherwise trigger a multi-gigabyte
+/// allocation. Uses a sparse file (`set_len`) so the test doesn't actually
+/// need to write the oversized content to disk.
+#[test]
+fn test_load_oversized_file_reports_too_large() {
+    App::test((), |mut app| async move {
+        let app = &mut app;
+        let files = app.add_singleton_model(FileModel::new);
+        let receiver = setup_event_channel(app, &files);
+
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("huge.log");
+        let file = std::fs::File::create(&path).expect("create file");
+        file.set_len(MAX_LOADABLE_FILE_SIZE_BYTES + 1)
+            .expect("set sparse length");
+        drop(file);
+
+        files.update(app, |model, ctx| {
+            model.open(&path, false, ctx);
+        });
+
+        match receiver.recv().await.expect("Could not receive the result") {
+            TestFileModelEvent::FailedToLoad(err) => {
+                assert!(
+                    err.contains("TooLarge"),
+                    "expected TooLarge error, got {err}"
+                );
+            }
+            event => panic!("Expected oversized file to fail to load, got {event:?}"),
+        }
+    });
+}
+
+/// [`FileModel::read_content_for_file`] is used for reload/discard flows and
+/// must apply the same size guard as `open`.
+#[test]
+fn test_read_content_for_file_reports_too_large() {
+    App::test((), |mut _app| async move {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("huge.log");
+        let file = std::fs::File::create(&path).expect("create file");
+        file.set_len(MAX_LOADABLE_FILE_SIZE_BYTES + 1)
+            .expect("set sparse length");
+        drop(file);
+
+        let result = FileModel::read_content_for_file(&path).await;
+        assert!(
+            matches!(
+                result,
+                Err(FileLoadError::TooLarge { limit_bytes, .. })
+                    if limit_bytes == MAX_LOADABLE_FILE_SIZE_BYTES
+            ),
+            "expected TooLarge error, got {result:?}"
+        );
+    });
+}
+
 static TEST_FILE_CONTENT: &[u8] = include_bytes!("../test_data/test_file.rs");
