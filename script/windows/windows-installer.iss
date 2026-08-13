@@ -34,7 +34,8 @@
 
 
 [Setup]
-; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId for other installers.
+; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
+; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
 AppId=warp-terminal-{#ReleaseChannel}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
@@ -91,7 +92,7 @@ SignedUninstaller=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:AdditionalIcons}"; GroupDescription: "{cm:AdditionalIcons}"
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
