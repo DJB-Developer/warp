@@ -38,6 +38,8 @@ pub struct ConptyApi {
     show_hide: Option<ShowHidePseudoConsoleFn>,
     /// Optional side-by-side ConPTY extension for releasing the reference handle.
     release: Option<ReleasePseudoConsoleFn>,
+    /// System ConPTY on pre-24H2 Windows can block in ClosePseudoConsole until clients disconnect.
+    system_backend: bool,
 }
 
 #[derive(Error, Debug)]
@@ -168,7 +170,12 @@ impl ConptyApi {
             close,
             show_hide,
             release,
+            system_backend: module_name == SYSTEM_CONPTY_DLL,
         })
+    }
+
+    pub(super) fn requires_pipe_disconnect_before_close(&self) -> bool {
+        self.system_backend
     }
 
     pub(super) unsafe fn create(
