@@ -1,0 +1,74 @@
+name: Package Windows Server 2019 debug test build
+
+on:
+  push:
+    branches:
+      - server-2019-package-debug
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build Warp OSS x64 debug installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Prepare Windows build environment
+        uses: ./.github/actions/prepare_environment
+        with:
+          target_os: windows
+          is_self_hosted: false
+          install_test_deps: false
+          install_release_deps: true
+
+      - name: Ensure Protobuf compiler
+        shell: pwsh
+        run: |
+          $protoc = Get-Command protoc.exe -ErrorAction SilentlyContinue
+          if (-not $protoc) {
+            winget install -e --id Google.Protobuf --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -ne 0) {
+              throw "winget failed to install Google.Protobuf (exit code $LASTEXITCODE)"
+            }
+            $wingetPackages = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+            $protocExe = Get-ChildItem $wingetPackages -Filter protoc.exe -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $protocExe) {
+              throw "Google.Protobuf was installed but protoc.exe could not be located"
+            }
+            $protocDir = $protocExe.DirectoryName
+            $protocDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            $env:PATH = "$protocDir;$env:PATH"
+          }
+          protoc --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "protoc is unavailable after dependency setup"
+          }
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue)) {
+            winget install -e --id JRSoftware.InnoSetup --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -ne 0) {
+              throw "winget failed to install Inno Setup (exit code $LASTEXITCODE)"
+            }
+          }
+          "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build unsigned Warp OSS debug installer
+        id: bundle
+        shell: pwsh
+        run: ./script/windows/bundle.ps1 -DEBUG_BUILD -CHANNEL oss -ARCH x64 -RELEASE_TAG "v0.0.0-server2019-debug"
+
+      - name: Upload Server 2019 debug test installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: warp-oss-server2019-debug-x64
+          path: ${{ steps.bundle.outputs.installer_path }}
+          retention-days: 7
+          if-no-files-found: error
