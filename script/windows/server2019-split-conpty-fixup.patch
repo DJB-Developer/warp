@@ -1,0 +1,10 @@
+diff --git a/app/src/terminal/local_tty/windows/mod.rs b/app/src/terminal/local_tty/windows/mod.rs
+--- a/app/src/terminal/local_tty/windows/mod.rs
++++ b/app/src/terminal/local_tty/windows/mod.rs
+@@ -60,7 +60,7 @@ unsafe impl Sync for ShareableHandle {}
+ 
+-pub(super) enum PtyPipe {
++pub enum PtyPipe {
+     Duplex(mio::windows::NamedPipe),
+     Split {
+         reader: mio::windows::NamedPipe,
