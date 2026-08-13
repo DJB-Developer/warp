@@ -79,6 +79,10 @@ fn windows_build_number() -> Option<u32> {
     build_number.parse().ok()
 }
 
+pub(super) fn requires_synchronous_conpty_pipe() -> bool {
+    windows_build_number().is_some_and(|build| build < BUNDLED_CONPTY_MIN_WINDOWS_BUILD)
+}
+
 impl ConptyApi {
     pub(super) unsafe fn load() -> Result<Self, ConptyApiError> {
         let windows_build = windows_build_number();
