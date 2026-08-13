@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: server2019-compat-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows-check:
     name: Check Warp OSS on Windows
