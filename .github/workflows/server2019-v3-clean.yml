@@ -1,53 +1,68 @@
-name: Server 2019 V3 bundled ConPTY clean
+name: Windows Server 2019 Release
 
 on:
   push:
-    branches: [server-2019-v3-bundled-final]
+    branches:
+      - server-2019-v3-bundled-final
+    tags:
+      - 'server2019-v*'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   package:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - name: Checkout sources
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - uses: ./.github/actions/prepare_environment
+      - name: Prepare Windows build environment
+        uses: ./.github/actions/prepare_environment
         with:
           target_os: windows
           is_self_hosted: false
           install_test_deps: false
           install_release_deps: true
 
-      - name: Force bundled ConPTY on Server 2019
+      - name: Enable bundled ConPTY on Windows Server 2019
         shell: pwsh
         run: |
           $path = 'app/src/terminal/local_tty/windows/conpty_api.rs'
           $source = Get-Content $path -Raw
           $old = 'const BUNDLED_CONPTY_MIN_WINDOWS_BUILD: u32 = 18362;'
           $new = 'const BUNDLED_CONPTY_MIN_WINDOWS_BUILD: u32 = 17763;'
-          if (-not $source.Contains($old)) { throw 'Expected 18362 threshold not found' }
-          $source = $source.Replace($old, $new)
-          Set-Content -Path $path -Value $source -Encoding utf8 -NoNewline
+          if ($source.Contains($old)) {
+            $source = $source.Replace($old, $new)
+            Set-Content -Path $path -Value $source -Encoding utf8 -NoNewline
+          }
           $verify = Get-Content $path -Raw
-          if (-not $verify.Contains($new)) { throw '17763 threshold was not applied' }
+          if (-not $verify.Contains($new)) {
+            throw 'Windows Server 2019 ConPTY threshold is not set to build 17763'
+          }
           Select-String -Path $path -Pattern 'BUNDLED_CONPTY_MIN_WINDOWS_BUILD'
           cargo clean -p warp --target x86_64-pc-windows-msvc
 
-      - name: Ensure protoc
+      - name: Verify Windows Server 2019 installer support
+        shell: pwsh
+        run: |
+          Select-String -Path script/windows/windows-installer.iss -Pattern 'MinVersion=10.0.17763'
+          if (-not $?) { throw 'GUI installer does not allow Windows Server 2019' }
+          Select-String -Path script/windows/tui-installer.iss -Pattern 'MinVersion=10.0.17763'
+          if (-not $?) { throw 'TUI installer does not allow Windows Server 2019' }
+
+      - name: Ensure Protobuf compiler
         shell: pwsh
         run: |
           if (-not (Get-Command protoc.exe -ErrorAction SilentlyContinue)) {
             winget install -e --id Google.Protobuf --accept-package-agreements --accept-source-agreements
-            if ($LASTEXITCODE -ne 0) { throw "winget failed to install Google.Protobuf" }
+            if ($LASTEXITCODE -ne 0) { throw 'winget failed to install Google.Protobuf' }
             $p = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages') -Filter protoc.exe -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($p) {
-              $p.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-              $env:PATH = "$($p.DirectoryName);$env:PATH"
-            }
+            if (-not $p) { throw 'protoc.exe could not be located after installation' }
+            $p.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            $env:PATH = "$($p.DirectoryName);$env:PATH"
           }
           protoc --version
 
@@ -56,18 +71,64 @@ jobs:
         run: |
           if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue)) {
             winget install -e --id JRSoftware.InnoSetup --accept-package-agreements --accept-source-agreements
-            if ($LASTEXITCODE -ne 0) { throw "winget failed to install Inno Setup" }
+            if ($LASTEXITCODE -ne 0) { throw 'winget failed to install Inno Setup' }
           }
-          "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          'C:\Program Files (x86)\Inno Setup 6' | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-      - name: Build installer
+      - name: Build Warp OSS installer
         id: bundle
         shell: pwsh
-        run: ./script/windows/bundle.ps1 -DEBUG_BUILD -CHANNEL oss -ARCH x64 -RELEASE_TAG "v0.0.0-server2019-v3-bundled-final"
+        run: |
+          $version = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}' } else { 'server2019-build-${{ github.run_number }}' }
+          ./script/windows/bundle.ps1 -CHANNEL oss -ARCH x64 -RELEASE_TAG $version
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - name: Prepare release assets
+        id: assets
+        shell: pwsh
+        run: |
+          $source = '${{ steps.bundle.outputs.installer_path }}'
+          $suffix = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}' } else { 'build-${{ github.run_number }}' }
+          $asset = "WarpOss-Server2019-x64-$suffix.exe"
+          Copy-Item $source $asset
+          $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant()
+          "$hash  $asset" | Set-Content "$asset.sha256" -Encoding ascii -NoNewline
+          "asset_path=$asset" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "checksum_path=$asset.sha256" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "SHA256: $hash"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: warp-oss-server2019-v3-bundled-final-x64
-          path: ${{ steps.bundle.outputs.installer_path }}
-          retention-days: 7
+          name: warp-oss-server2019-x64
+          path: |
+            ${{ steps.assets.outputs.asset_path }}
+            ${{ steps.assets.outputs.checksum_path }}
+          retention-days: 14
           if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/server2019-v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          @'
+          Unofficial community compatibility build of Warp OSS for Windows Server 2019.
+
+          Changes:
+          - Supports Windows Server 2019 x64 / build 17763+
+          - Enables Warp bundled ConPTY backend on Windows Server 2019
+          - GUI installer minimum Windows build lowered to 17763
+          - Verified on Windows Server 2019
+
+          Notes:
+          - This is not an official Warp release.
+          - The installer is currently unsigned and Windows may show an unknown publisher warning.
+          '@ | Set-Content release-notes.md -Encoding utf8
+
+          gh release create '${{ github.ref_name }}' `
+            '${{ steps.assets.outputs.asset_path }}' `
+            '${{ steps.assets.outputs.checksum_path }}' `
+            --title "Warp OSS for Windows Server 2019 ${{ github.ref_name }}" `
+            --notes-file release-notes.md `
+            --prerelease
