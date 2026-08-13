@@ -27,6 +27,11 @@ type ClosePseudoConsoleFn = unsafe extern "system" fn(HPCON);
 type ShowHidePseudoConsoleFn = unsafe extern "system" fn(HPCON, bool) -> HRESULT;
 type ReleasePseudoConsoleFn = unsafe extern "system" fn(HPCON) -> HRESULT;
 
+struct SendablePseudoConsole(HPCON);
+
+// A pseudoconsole handle can be closed from a thread other than the one that created it.
+unsafe impl Send for SendablePseudoConsole {}
+
 pub struct ConptyApi {
     /// Function pointer for CreatePseudoConsole.
     create: CreatePseudoConsoleFn,
@@ -174,10 +179,6 @@ impl ConptyApi {
         })
     }
 
-    pub(super) fn requires_pipe_disconnect_before_close(&self) -> bool {
-        self.system_backend
-    }
-
     pub(super) unsafe fn create(
         &self,
         size: COORD,
@@ -205,7 +206,15 @@ impl ConptyApi {
     }
 
     pub(super) unsafe fn close(&self, pty_handle: HPCON) {
-        unsafe { (self.close)(pty_handle) }
+        if self.system_backend {
+            let close = self.close;
+            let pty_handle = SendablePseudoConsole(pty_handle);
+            std::thread::spawn(move || unsafe {
+                close(pty_handle.0);
+            });
+        } else {
+            unsafe { (self.close)(pty_handle) }
+        }
     }
 
     pub(super) unsafe fn show_hide(
