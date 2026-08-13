@@ -91,28 +91,12 @@ impl ConptyApi {
             windows_build.filter(|build| *build < BUNDLED_CONPTY_MIN_WINDOWS_BUILD)
         {
             log::info!("Using system ConPTY compatibility backend for Windows build {build}");
-            match unsafe { Self::load_from_module(SYSTEM_CONPTY_DLL, false) } {
-                Ok(api) => return Ok(api),
-                Err(system_error) => {
-                    log::warn!(
-                        "Failed to load the system ConPTY compatibility backend; trying bundled ConPTY: {system_error:#}"
-                    );
-                }
-            }
+            return unsafe { Self::load_from_module(SYSTEM_CONPTY_DLL, false) };
         }
 
-        match unsafe { Self::load_from_module(BUNDLED_CONPTY_DLL, true) } {
-            Ok(api) => {
-                log::info!("Using bundled ConPTY backend for Windows build {windows_build:?}");
-                Ok(api)
-            }
-            Err(bundled_error) => {
-                log::warn!(
-                    "Failed to load bundled ConPTY; falling back to the system ConPTY backend: {bundled_error:#}"
-                );
-                unsafe { Self::load_from_module(SYSTEM_CONPTY_DLL, false) }
-            }
-        }
+        let api = unsafe { Self::load_from_module(BUNDLED_CONPTY_DLL, true) }?;
+        log::info!("Using bundled ConPTY backend for Windows build {windows_build:?}");
+        Ok(api)
     }
 
     unsafe fn load_from_module(
