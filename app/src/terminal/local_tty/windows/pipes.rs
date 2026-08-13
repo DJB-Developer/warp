@@ -22,6 +22,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
 use windows::Win32::System::WindowsProgramming::RtlInitUnicodeString;
 
+use super::conpty_api::requires_synchronous_conpty_pipe;
 use crate::terminal::local_tty::windows::ShareableHandle;
 
 /// A handle to the device directory where we can open named pipes.
@@ -75,10 +76,11 @@ pub struct DuplexPipe {
     pub server: HANDLE,
 }
 
-/// Creates a bidirectional, asynchronous anonymous pipe.
+/// Creates a bidirectional pipe with an asynchronous server endpoint for Warp.
 ///
-/// This is based on the Windows Terminal code here:
-/// https://github.com/microsoft/terminal/blob/93930bb3fa99d4e6986a85e7950caefb717af910/src/types/utils.cpp#L715-L774
+/// The client endpoint remains asynchronous for Warp's bundled ConPTY, matching Windows Terminal's
+/// side-by-side ConPTY path. Windows Server 2019 uses Kernel32's public ConPTY API, which requires
+/// synchronous input/output handles, so only that endpoint is opened synchronously there.
 pub fn create_async_anonymous_pipe() -> Result<DuplexPipe, CreatePipeError> {
     const BUFFER_SIZE: u32 = 128 * 1024;
 
@@ -106,7 +108,7 @@ pub fn create_async_anonymous_pipe() -> Result<DuplexPipe, CreatePipeError> {
             &mut io_status_block,
             share_access.0,
             FILE_CREATE.0,
-            // Synchronous pipes would set FILE_SYNCHRONOUS_IO_NONALERT here.
+            // Warp uses overlapped I/O on the server endpoint through mio.
             NTCREATEFILE_CREATE_OPTIONS::default().0,
             FILE_PIPE_BYTE_STREAM_TYPE,
             FILE_PIPE_BYTE_STREAM_MODE,
@@ -119,6 +121,12 @@ pub fn create_async_anonymous_pipe() -> Result<DuplexPipe, CreatePipeError> {
         .ok()
         .map_err(CreatePipeError::CreatePipe)?;
 
+        let client_create_options = if requires_synchronous_conpty_pipe() {
+            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT
+        } else {
+            FILE_NON_DIRECTORY_FILE
+        };
+
         let mut client = HANDLE::default();
         object_attributes.RootDirectory = server;
         windows::core::HRESULT::from(NtCreateFile(
@@ -130,7 +138,7 @@ pub fn create_async_anonymous_pipe() -> Result<DuplexPipe, CreatePipeError> {
             FILE_FLAGS_AND_ATTRIBUTES::default(),
             share_access,
             FILE_OPEN,
-            FILE_NON_DIRECTORY_FILE,
+            client_create_options,
             None,
             0,
         ))
