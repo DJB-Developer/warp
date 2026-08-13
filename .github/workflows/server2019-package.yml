@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: server2019-package-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   package:
     name: Build Warp OSS x64 installer
@@ -26,13 +30,43 @@ jobs:
           install_test_deps: false
           install_release_deps: true
 
+      - name: Ensure Protobuf compiler
+        shell: pwsh
+        run: |
+          $protoc = Get-Command protoc.exe -ErrorAction SilentlyContinue
+          if (-not $protoc) {
+            winget install -e --id Google.Protobuf --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -ne 0) {
+              throw "winget failed to install Google.Protobuf (exit code $LASTEXITCODE)"
+            }
+
+            $wingetPackages = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages'
+            $protocExe = Get-ChildItem $wingetPackages -Filter protoc.exe -File -Recurse -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if (-not $protocExe) {
+              throw "Google.Protobuf was installed but protoc.exe could not be located"
+            }
+
+            $protocDir = $protocExe.DirectoryName
+            $protocDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            $env:PATH = "$protocDir;$env:PATH"
+          }
+
+          protoc --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "protoc is unavailable after dependency setup"
+          }
+
       - name: Install Inno Setup
         shell: pwsh
         run: |
           if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue)) {
             winget install -e --id JRSoftware.InnoSetup --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -ne 0) {
+              throw "winget failed to install Inno Setup (exit code $LASTEXITCODE)"
+            }
           }
-          "C:\Program Files (x86)\Inno Setup 6" >> $env:GITHUB_PATH
+          "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build unsigned Warp OSS installer
         id: bundle
