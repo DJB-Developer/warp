@@ -1,0 +1,289 @@
+diff --git a/app/src/terminal/local_tty/windows/conpty_api.rs b/app/src/terminal/local_tty/windows/conpty_api.rs
+index 8917c716fe4..00000000000 100644
+--- a/app/src/terminal/local_tty/windows/conpty_api.rs
++++ b/app/src/terminal/local_tty/windows/conpty_api.rs
+@@ -181,6 +181,27 @@ impl ConptyApi {
+         result
+     }
+ 
++    /// Creates a pseudoconsole using the original public Kernel32 ConPTY contract.
++    /// Windows Server 2019 expects distinct input and output handles here.
++    pub(super) unsafe fn create_split(
++        &self,
++        size: COORD,
++        mut input_pipe: HANDLE,
++        mut output_pipe: HANDLE,
++        flags: u32,
++    ) -> Result<HPCON, windows::core::Error> {
++        let mut pty_handle = HPCON::default();
++        let result = unsafe {
++            (self.create)(size, input_pipe, output_pipe, flags, &mut pty_handle)
++        }
++        .ok()
++        .map(|_| pty_handle);
++        unsafe {
++            windows::core::Free::free(&mut input_pipe);
++            windows::core::Free::free(&mut output_pipe);
++        }
++        result
++    }
++
+     pub(super) unsafe fn resize(
+         &self,
+         pty_handle: HPCON,
+diff --git a/app/src/terminal/local_tty/windows/mod.rs b/app/src/terminal/local_tty/windows/mod.rs
+index c53803418fd..00000000000 100644
+--- a/app/src/terminal/local_tty/windows/mod.rs
++++ b/app/src/terminal/local_tty/windows/mod.rs
+@@ -34,6 +34,8 @@ use crate::terminal::local_tty::windows::proc_thread_attribute_list::ProcThreadA
+ use crate::terminal::writeable_pty;
+ 
++const PTY_WRITE_TOKEN: mio::Token = mio::Token(3);
++
+ trait ToCoord {
+     fn to_coord(&self) -> COORD;
+ }
+@@ -58,9 +60,104 @@ unsafe impl Send for ShareableHandle {}
+ unsafe impl Sync for ShareableHandle {}
+ 
++pub(super) enum PtyPipe {
++    Duplex(mio::windows::NamedPipe),
++    Split {
++        reader: mio::windows::NamedPipe,
++        writer: mio::windows::NamedPipe,
++    },
++}
++
++impl std::io::Read for PtyPipe {
++    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
++        match self {
++            Self::Duplex(pipe) => std::io::Read::read(pipe, buf),
++            Self::Split { reader, .. } => std::io::Read::read(reader, buf),
++        }
++    }
++}
++
++impl std::io::Write for PtyPipe {
++    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
++        match self {
++            Self::Duplex(pipe) => std::io::Write::write(pipe, buf),
++            Self::Split { writer, .. } => std::io::Write::write(writer, buf),
++        }
++    }
++
++    fn flush(&mut self) -> std::io::Result<()> {
++        match self {
++            Self::Duplex(pipe) => std::io::Write::flush(pipe),
++            Self::Split { writer, .. } => std::io::Write::flush(writer),
++        }
++    }
++}
++
++impl PtyPipe {
++    fn register(&mut self, poll: &mio::Poll, interest: mio::Interest) -> std::io::Result<()> {
++        match self {
++            Self::Duplex(pipe) => poll.registry().register(pipe, PTY_TOKEN, interest),
++            Self::Split { reader, writer } => {
++                poll.registry()
++                    .register(reader, PTY_TOKEN, mio::Interest::READABLE)?;
++                poll.registry()
++                    .register(writer, PTY_WRITE_TOKEN, mio::Interest::WRITABLE)
++            }
++        }
++    }
++
++    fn reregister(&mut self, poll: &mio::Poll, interest: mio::Interest) -> std::io::Result<()> {
++        match self {
++            Self::Duplex(pipe) => poll.registry().reregister(pipe, PTY_TOKEN, interest),
++            Self::Split { reader, writer } => {
++                poll.registry()
++                    .reregister(reader, PTY_TOKEN, mio::Interest::READABLE)?;
++                poll.registry()
++                    .reregister(writer, PTY_WRITE_TOKEN, mio::Interest::WRITABLE)
++            }
++        }
++    }
++
++    fn deregister(&mut self, poll: &mio::Poll) -> std::io::Result<()> {
++        match self {
++            Self::Duplex(pipe) => poll.registry().deregister(pipe),
++            Self::Split { reader, writer } => {
++                poll.registry().deregister(reader)?;
++                poll.registry().deregister(writer)
++            }
++        }
++    }
++
++    fn read_token(&self) -> mio::Token {
++        PTY_TOKEN
++    }
++
++    fn write_token(&self) -> mio::Token {
++        match self {
++            Self::Duplex(_) => PTY_TOKEN,
++            Self::Split { .. } => PTY_WRITE_TOKEN,
++        }
++    }
++
++    fn drain_and_disconnect(&mut self) {
++        let mut buffer = [0; 1000];
++        match self {
++            Self::Duplex(pipe) => {
++                while let Ok(bytes_read) = std::io::Read::read(pipe, &mut buffer) {
++                    if bytes_read == 0 {
++                        break;
++                    }
++                }
++                let _ = pipe.disconnect();
++            }
++            Self::Split { reader, writer } => {
++                // Stop accepting input first, while leaving the output side alive long enough to
++                // drain anything emitted while the legacy ClosePseudoConsole call completes.
++                let _ = writer.disconnect();
++                while let Ok(bytes_read) = std::io::Read::read(reader, &mut buffer) {
++                    if bytes_read == 0 {
++                        break;
++                    }
++                }
++                let _ = reader.disconnect();
++            }
++        }
++    }
++}
++
+ pub(super) struct PtySpawnResult {
+     pub pty_handle: HPCON,
+-    pub pipe: mio::windows::NamedPipe,
++    pub pipe: PtyPipe,
+     pub conpty_api: ConptyApi,
+     child_exit_watcher: ChildExitWatcher,
+ }
+@@ -151,14 +248,40 @@ pub(super) fn spawn(
+         ..
+     } = options;
+ 
+-    let pipes::DuplexPipe { client, server } =
+-        pipes::create_async_anonymous_pipe().map_err(PtySpawnError::CreatePipeFailed)?;
+-
+-    // Create the pseudoconsole, giving it the handle to the client side of the pipe.
+-    let pty_handle = match unsafe { conpty_api.create(size.to_coord(), client, 0) } {
+-        Ok(pty_handle) => pty_handle,
+-        Err(err) => return Err(PtySpawnError::CreatePseudoConsoleFailed(err)),
++    let (pty_handle, pipe) = if conpty_api::requires_synchronous_conpty_pipe() {
++        log::info!("Creating Server 2019 ConPTY with split input/output pipes");
++        let input = pipes::create_async_anonymous_pipe().map_err(PtySpawnError::CreatePipeFailed)?;
++        let output =
++            pipes::create_async_anonymous_pipe().map_err(PtySpawnError::CreatePipeFailed)?;
++        let pty_handle = match unsafe {
++            conpty_api.create_split(size.to_coord(), input.client, output.client, 0)
++        } {
++            Ok(pty_handle) => pty_handle,
++            Err(err) => return Err(PtySpawnError::CreatePseudoConsoleFailed(err)),
++        };
++        let reader = unsafe { mio::windows::NamedPipe::from_raw_handle(output.server.0 as *mut _) };
++        let writer = unsafe { mio::windows::NamedPipe::from_raw_handle(input.server.0 as *mut _) };
++        (
++            pty_handle,
++            PtyPipe::Split {
++                reader,
++                writer,
++            },
++        )
++    } else {
++        let pipes::DuplexPipe { client, server } =
++            pipes::create_async_anonymous_pipe().map_err(PtySpawnError::CreatePipeFailed)?;
++        let pty_handle = match unsafe { conpty_api.create(size.to_coord(), client, 0) } {
++            Ok(pty_handle) => pty_handle,
++            Err(err) => return Err(PtySpawnError::CreatePseudoConsoleFailed(err)),
++        };
++        let pipe = unsafe { mio::windows::NamedPipe::from_raw_handle(server.0 as *mut _) };
++        (pty_handle, PtyPipe::Duplex(pipe))
+     };
++    log::info!("Created pseudoconsole successfully");
+ 
+     // Tell the pseudoconsole that it is already visible.
+     let _ = unsafe { conpty_api.show_hide(pty_handle, true) };
+@@ -234,9 +357,10 @@ pub(super) fn spawn(
+             PtySpawnError::CreateShellProcessFailed { detail, error }
+         })?;
+     }
++    log::info!("Started shell process pid={}", process_information.dwProcessId);
+ 
+     let _ = unsafe { conpty_api.release(pty_handle) };
+ 
+-    let pipe = unsafe { mio::windows::NamedPipe::from_raw_handle(server.0 as *mut _) };
+     let child_exit_watcher = ChildExitWatcher::new(process_information.hProcess, event_loop_tx)
+         .map_err(PtySpawnError::ChildExitWatcherFailed)?;
+@@ -333,7 +457,7 @@ pub struct Pty {
+     handle: Box<dyn PtyHandle>,
+     /// An arbitrary type on Windows used to interact with the psuedoconsole.
+     pty_handle: HPCON,
+-    pipe: mio::windows::NamedPipe,
++    pipe: PtyPipe,
+     token: mio::Token,
+     conpty_api: ConptyApi,
+     pty_closed: bool,
+@@ -392,17 +516,7 @@ impl Pty {
+             self.conpty_api.close(self.pty_handle);
+         }
+ 
+-        // Drain all data in the pipe.
+-        let mut buffer = [0; 1000];
+-        while let Ok(num_byes_read) = self.pipe.read(&mut buffer) {
+-            if num_byes_read == 0 {
+-                break;
+-            }
+-        }
+-
+-        // Finally, disconnect from the console host, which will ultimately get it to terminate.
+-        let _ = self.pipe.disconnect();
++        self.pipe.drain_and_disconnect();
+     }
+ }
+ 
+ impl EventedReadWrite for Pty {
+-    type Reader = mio::windows::NamedPipe;
+-    type Writer = mio::windows::NamedPipe;
++    type Reader = PtyPipe;
++    type Writer = PtyPipe;
+ 
+     fn register(&mut self, poll: &mio::Poll, interest: mio::Interest) -> std::io::Result<()> {
+-        poll.registry()
+-            .register(&mut self.pipe, self.token, interest)?;
++        self.pipe.register(poll, interest)?;
+         poll.registry().register(
+             &mut self.child_exit_watcher,
+             SIGNALS_TOKEN,
+@@ -412,8 +526,7 @@ impl EventedReadWrite for Pty {
+     }
+ 
+     fn reregister(&mut self, poll: &mio::Poll, interest: mio::Interest) -> std::io::Result<()> {
+-        poll.registry()
+-            .reregister(&mut self.pipe, self.token, interest)?;
++        self.pipe.reregister(poll, interest)?;
+         poll.registry().reregister(
+             &mut self.child_exit_watcher,
+             SIGNALS_TOKEN,
+@@ -423,7 +536,7 @@ impl EventedReadWrite for Pty {
+     }
+ 
+     fn deregister(&mut self, poll: &mio::Poll) -> std::io::Result<()> {
+-        poll.registry().deregister(&mut self.pipe)?;
++        self.pipe.deregister(poll)?;
+         poll.registry().deregister(&mut self.child_exit_watcher)
+     }
+@@ -433,7 +546,7 @@ impl EventedReadWrite for Pty {
+     }
+ 
+     fn read_token(&self) -> mio::Token {
+-        self.token
++        self.pipe.read_token()
+     }
+@@ -443,7 +556,7 @@ impl EventedReadWrite for Pty {
+     }
+ 
+     fn write_token(&self) -> mio::Token {
+-        self.token
++        self.pipe.write_token()
+     }
+ }
