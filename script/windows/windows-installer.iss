@@ -34,8 +34,7 @@
 
 
 [Setup]
-; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
-; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
+; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId for other installers.
 AppId=warp-terminal-{#ReleaseChannel}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
@@ -72,8 +71,9 @@ CloseApplications=force
 ; before Setup proceeds. Returned empty for background updates so the check is skipped.
 AppMutex={code:GetAppMutex}
 SetupMutex={#AppMutexName}Setup
-; Version 1809 / Build 18362 is required for ConPTY. See https://github.com/microsoft/vscode-docs/blob/9d736b662fdde3fed17d8bc2ed70bfea4ae20636/docs/supporting/troubleshoot-terminal-launch.md?plain=1#L66/
-MinVersion=10.0.18362
+; Windows Server 2019 is based on Windows 10 version 1809 / build 17763 and includes ConPTY.
+; Warp bundles conpty.dll and OpenConsole.exe, so allow Server 2019 for compatibility testing.
+MinVersion=10.0.17763
 ; Tell Windows Explorer to reload the environment so that path changes take effect.
 ChangesEnvironment=true
 RedirectionGuard=no
@@ -91,7 +91,7 @@ SignedUninstaller=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+Name: "desktopicon"; Description: "{cm:AdditionalIcons}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
