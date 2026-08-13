@@ -1,0 +1,30 @@
+name: Windows Server 2019 compatibility check
+
+on:
+  push:
+    branches:
+      - server-2019-compat
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-check:
+    name: Check Warp OSS on Windows
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Prepare Windows build environment
+        uses: ./.github/actions/prepare_environment
+        with:
+          target_os: windows
+          is_self_hosted: false
+          install_test_deps: false
+
+      - name: Check Windows OSS bundle
+        shell: pwsh
+        run: ./script/windows/bundle.ps1 -CHECK_ONLY -CHANNEL oss -ARCH x64
