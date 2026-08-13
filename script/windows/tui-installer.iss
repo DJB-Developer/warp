@@ -60,7 +60,9 @@ SetupIconFile="..\..\app\channels\{#ReleaseChannel}\icon\no-padding\icon.ico"
 CloseApplications=no
 RestartApplications=no
 SetupMutex=Local\WarpAgentCLI{#ReleaseChannel}Setup
-MinVersion=10.0.18362
+; Windows Server 2019 is based on Windows 10 version 1809 / build 17763 and includes ConPTY.
+; Warp bundles conpty.dll and OpenConsole.exe, so allow Server 2019 for compatibility testing.
+MinVersion=10.0.17763
 ChangesEnvironment=true
 RedirectionGuard=no
 #ifdef SIGN_TOOL
