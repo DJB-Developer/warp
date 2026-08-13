@@ -7,6 +7,12 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Console::{COORD, HPCON};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::core::{HRESULT, HSTRING, PCWSTR, s};
+use winreg::RegKey;
+use winreg::enums::HKEY_LOCAL_MACHINE;
+
+const BUNDLED_CONPTY_DLL: &str = "conpty.dll";
+const SYSTEM_CONPTY_DLL: &str = "kernel32.dll";
+const BUNDLED_CONPTY_MIN_WINDOWS_BUILD: u32 = 18362;
 
 const CREATE_PSUEDOCONSOLE_FN_NAME: &str = "CreatePsuedoConsole";
 const RESIZE_PSUEDOCONSOLE_FN_NAME: &str = "ResizePsuedoConsole";
@@ -28,10 +34,10 @@ pub struct ConptyApi {
     resize: ResizePseudoConsoleFn,
     /// Function pointer for ClosePseudoConsole.
     close: ClosePseudoConsoleFn,
-    /// Function pointer for ShowHidePseudoConsole.
-    show_hide: ShowHidePseudoConsoleFn,
-    /// Function pointer for ReleasePseudoConsole.
-    release: ReleasePseudoConsoleFn,
+    /// Optional side-by-side ConPTY extension for syncing pseudo-window visibility.
+    show_hide: Option<ShowHidePseudoConsoleFn>,
+    /// Optional side-by-side ConPTY extension for releasing the reference handle.
+    release: Option<ReleasePseudoConsoleFn>,
 }
 
 #[derive(Error, Debug)]
@@ -39,9 +45,10 @@ pub enum ConptyApiError {
     #[error("Failed to construct target directory: {0}")]
     NoTargetDirectory(#[from] TargetDirError),
     #[error(
-        "Failed to load ConPTY library module: {windows_error:#}. DLL file exists: {dll_file_exists:?}"
+        "Failed to load ConPTY library module {module_name:?}: {windows_error:#}. DLL file exists: {dll_file_exists:?}"
     )]
     LoadLibraryFailed {
+        module_name: String,
         #[source]
         windows_error: windows::core::Error,
         dll_file_exists: Result<bool, std::io::Error>,
@@ -50,64 +57,105 @@ pub enum ConptyApiError {
     GetProcAddressFailed { fn_name: String },
 }
 
+fn windows_build_number() -> Option<u32> {
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let current_version = hklm
+        .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+        .ok()?;
+    let build_number: String = current_version.get_value("CurrentBuildNumber").ok()?;
+    build_number.parse().ok()
+}
+
 impl ConptyApi {
     pub(super) unsafe fn load() -> Result<Self, ConptyApiError> {
+        let windows_build = windows_build_number();
+
+        if windows_build.is_some_and(|build| build < BUNDLED_CONPTY_MIN_WINDOWS_BUILD) {
+            log::info!(
+                "Using system ConPTY compatibility backend for Windows build {:?}",
+                windows_build
+            );
+            return unsafe { Self::load_from_module(SYSTEM_CONPTY_DLL, false) };
+        }
+
+        match unsafe { Self::load_from_module(BUNDLED_CONPTY_DLL, true) } {
+            Ok(api) => {
+                log::info!("Using bundled ConPTY backend for Windows build {windows_build:?}");
+                Ok(api)
+            }
+            Err(bundled_error) => {
+                log::warn!(
+                    "Failed to load bundled ConPTY; falling back to the system ConPTY backend: {bundled_error:#}"
+                );
+                unsafe { Self::load_from_module(SYSTEM_CONPTY_DLL, false) }
+            }
+        }
+    }
+
+    unsafe fn load_from_module(
+        module_name: &str,
+        require_extensions: bool,
+    ) -> Result<Self, ConptyApiError> {
         type LoadedFn = unsafe extern "system" fn() -> isize;
 
-        let hstring = HSTRING::from("conpty.dll");
+        let hstring = HSTRING::from(module_name);
         let dll_file_path = PCWSTR::from_raw(hstring.as_ptr());
-
-        let conpty_module = match unsafe { LoadLibraryW(dll_file_path) } {
-            Ok(conpty_module) => conpty_module,
+        let module = match unsafe { LoadLibraryW(dll_file_path) } {
+            Ok(module) => module,
             Err(windows_error) => {
-                let dll_file_exists = Path::new("./conpty.dll").try_exists();
+                let dll_file_exists = if module_name == BUNDLED_CONPTY_DLL {
+                    Path::new("./conpty.dll").try_exists()
+                } else {
+                    Ok(true)
+                };
                 return Err(ConptyApiError::LoadLibraryFailed {
+                    module_name: module_name.to_owned(),
                     windows_error,
                     dll_file_exists,
                 });
             }
         };
-        let Some(create) = unsafe { GetProcAddress(conpty_module, s!("CreatePseudoConsole")) }
+
+        let Some(create) = unsafe { GetProcAddress(module, s!("CreatePseudoConsole")) }
             .map(|create_fn| unsafe { transmute::<LoadedFn, CreatePseudoConsoleFn>(create_fn) })
         else {
             return Err(ConptyApiError::GetProcAddressFailed {
                 fn_name: CREATE_PSUEDOCONSOLE_FN_NAME.to_string(),
             });
         };
-        let Some(resize) = unsafe { GetProcAddress(conpty_module, s!("ResizePseudoConsole")) }
+        let Some(resize) = unsafe { GetProcAddress(module, s!("ResizePseudoConsole")) }
             .map(|resize_fn| unsafe { transmute::<LoadedFn, ResizePseudoConsoleFn>(resize_fn) })
         else {
             return Err(ConptyApiError::GetProcAddressFailed {
                 fn_name: RESIZE_PSUEDOCONSOLE_FN_NAME.to_string(),
             });
         };
-        let Some(close) = unsafe { GetProcAddress(conpty_module, s!("ClosePseudoConsole")) }
+        let Some(close) = unsafe { GetProcAddress(module, s!("ClosePseudoConsole")) }
             .map(|close_fn| unsafe { transmute::<LoadedFn, ClosePseudoConsoleFn>(close_fn) })
         else {
             return Err(ConptyApiError::GetProcAddressFailed {
                 fn_name: CLOSE_PSUEDOCONSOLE_FN_NAME.to_string(),
             });
         };
-        let Some(show_hide) =
-            unsafe { GetProcAddress(conpty_module, s!("ConptyShowHidePseudoConsole")) }.map(
-                |show_hide_fn| unsafe {
-                    transmute::<LoadedFn, ShowHidePseudoConsoleFn>(show_hide_fn)
-                },
-            )
-        else {
+
+        let show_hide = unsafe { GetProcAddress(module, s!("ConptyShowHidePseudoConsole")) }.map(
+            |show_hide_fn| unsafe { transmute::<LoadedFn, ShowHidePseudoConsoleFn>(show_hide_fn) },
+        );
+        if require_extensions && show_hide.is_none() {
             return Err(ConptyApiError::GetProcAddressFailed {
                 fn_name: SHOW_HIDE_PSUEDOCONSOLE_FN_NAME.to_string(),
             });
-        };
-        let Some(release) =
-            unsafe { GetProcAddress(conpty_module, s!("ConptyReleasePseudoConsole")) }.map(
-                |release_fn| unsafe { transmute::<LoadedFn, ReleasePseudoConsoleFn>(release_fn) },
-            )
-        else {
+        }
+
+        let release = unsafe { GetProcAddress(module, s!("ConptyReleasePseudoConsole")) }.map(
+            |release_fn| unsafe { transmute::<LoadedFn, ReleasePseudoConsoleFn>(release_fn) },
+        );
+        if require_extensions && release.is_none() {
             return Err(ConptyApiError::GetProcAddressFailed {
                 fn_name: RELEASE_PSUEDOCONSOLE_FN_NAME.to_string(),
             });
-        };
+        }
+
         Ok(ConptyApi {
             create,
             resize,
@@ -152,10 +200,16 @@ impl ConptyApi {
         pty_handle: HPCON,
         visible: bool,
     ) -> windows::core::Result<()> {
-        unsafe { (self.show_hide)(pty_handle, visible).ok() }
+        match self.show_hide {
+            Some(show_hide) => unsafe { show_hide(pty_handle, visible).ok() },
+            None => Ok(()),
+        }
     }
 
     pub(super) unsafe fn release(&self, pty_handle: HPCON) -> windows::core::Result<()> {
-        unsafe { (self.release)(pty_handle).ok() }
+        match self.release {
+            Some(release) => unsafe { release(pty_handle).ok() },
+            None => Ok(()),
+        }
     }
 }
