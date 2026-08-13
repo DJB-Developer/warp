@@ -32,6 +32,12 @@ struct SendablePseudoConsole(HPCON);
 // A pseudoconsole handle can be closed from a thread other than the one that created it.
 unsafe impl Send for SendablePseudoConsole {}
 
+impl SendablePseudoConsole {
+    unsafe fn close(self, close: ClosePseudoConsoleFn) {
+        unsafe { close(self.0) }
+    }
+}
+
 pub struct ConptyApi {
     /// Function pointer for CreatePseudoConsole.
     create: CreatePseudoConsoleFn,
@@ -43,7 +49,7 @@ pub struct ConptyApi {
     show_hide: Option<ShowHidePseudoConsoleFn>,
     /// Optional side-by-side ConPTY extension for releasing the reference handle.
     release: Option<ReleasePseudoConsoleFn>,
-    /// System ConPTY on pre-24H2 Windows can block in ClosePseudoConsole until clients disconnect.
+    /// Whether closing must account for legacy system ConPTY blocking behavior.
     system_backend: bool,
 }
 
@@ -209,8 +215,8 @@ impl ConptyApi {
         if self.system_backend {
             let close = self.close;
             let pty_handle = SendablePseudoConsole(pty_handle);
-            std::thread::spawn(move || unsafe {
-                close(pty_handle.0);
+            let _ = std::thread::spawn(move || unsafe {
+                pty_handle.close(close);
             });
         } else {
             unsafe { (self.close)(pty_handle) }
