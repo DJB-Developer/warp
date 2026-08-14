@@ -12,7 +12,7 @@ use winreg::enums::HKEY_LOCAL_MACHINE;
 
 const BUNDLED_CONPTY_DLL: &str = "conpty.dll";
 const SYSTEM_CONPTY_DLL: &str = "kernel32.dll";
-const BUNDLED_CONPTY_MIN_WINDOWS_BUILD: u32 = 18362;
+const BUNDLED_CONPTY_MIN_WINDOWS_BUILD: u32 = 17763;
 
 const CREATE_PSUEDOCONSOLE_FN_NAME: &str = "CreatePsuedoConsole";
 const RESIZE_PSUEDOCONSOLE_FN_NAME: &str = "ResizePsuedoConsole";
