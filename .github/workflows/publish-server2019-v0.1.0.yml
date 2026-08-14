@@ -1,0 +1,98 @@
+name: Publish tested Windows Server 2019 prerelease
+
+on:
+  push:
+    branches:
+      - publish-server2019-v0.1.0
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download tested installer artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh run download 31720376214 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name warp-oss-server2019-v3-bundled-final-x64 \
+            --dir release-assets
+          find release-assets -maxdepth 3 -type f -print
+
+      - name: Prepare release files
+        id: assets
+        run: |
+          set -euo pipefail
+          source_exe="$(find release-assets -type f -iname '*.exe' | head -n 1)"
+          if [ -z "$source_exe" ]; then
+            echo 'No installer executable found in downloaded artifact.' >&2
+            exit 1
+          fi
+
+          asset="WarpOss-Server2019-x64-server2019-v0.1.0.exe"
+          cp "$source_exe" "$asset"
+          sha256sum "$asset" > "$asset.sha256"
+
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "checksum=$asset.sha256" >> "$GITHUB_OUTPUT"
+          cat "$asset.sha256"
+
+      - name: Create release notes
+        run: |
+          cat > release-notes.md <<'EOF'
+          ## Warp OSS for Windows Server 2019
+
+          Unofficial community compatibility build of Warp OSS for Windows Server 2019.
+
+          ### Compatibility changes
+
+          - Supports Windows Server 2019 x64 / Windows build 17763+
+          - Enables Warp's bundled ConPTY backend on Windows Server 2019
+          - Allows installation on Windows Server 2019
+          - Tested successfully on Windows Server 2019 with PowerShell and Warp Agent workflows
+
+          ### Build provenance
+
+          - Tested workflow run: `31720376214`
+          - Source commit: `aafa8e56f0d2d64789e9b922937095b6458ac4e9`
+          - Artifact: `warp-oss-server2019-v3-bundled-final-x64`
+
+          ### Important notes
+
+          - This is an unofficial community build and is not an official Warp release.
+          - The installer is unsigned, so Windows may display an unknown publisher warning.
+          - This first release is marked as a pre-release while broader compatibility testing continues.
+          EOF
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='server2019-v0.1.0'
+          title='Warp OSS for Windows Server 2019 v0.1.0'
+          target='aafa8e56f0d2d64789e9b922937095b6458ac4e9'
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" \
+              "${{ steps.assets.outputs.asset }}" \
+              "${{ steps.assets.outputs.checksum }}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$tag" \
+              "${{ steps.assets.outputs.asset }}" \
+              "${{ steps.assets.outputs.checksum }}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$target" \
+              --title "$title" \
+              --notes-file release-notes.md \
+              --prerelease
+          fi
