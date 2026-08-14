@@ -61,7 +61,8 @@ jobs:
           ### Build provenance
 
           - Tested workflow run: `31720376214`
-          - Source commit: `aafa8e56f0d2d64789e9b922937095b6458ac4e9`
+          - Release source commit: `d2a6799469ad9a7661b00ef051b015f5b3d29e6a`
+          - Tested build commit: `aafa8e56f0d2d64789e9b922937095b6458ac4e9`
           - Artifact: `warp-oss-server2019-v3-bundled-final-x64`
 
           ### Important notes
@@ -78,7 +79,7 @@ jobs:
           set -euo pipefail
           tag='server2019-v0.1.0'
           title='Warp OSS for Windows Server 2019 v0.1.0'
-          target='aafa8e56f0d2d64789e9b922937095b6458ac4e9'
+          target='d2a6799469ad9a7661b00ef051b015f5b3d29e6a'
 
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" \
